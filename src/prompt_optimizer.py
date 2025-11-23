@@ -2,7 +2,7 @@
 """
 提示词优化器 - Layer 1: Workflow生成提示词动态优化
 """
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 
 class PromptOptimizer:
@@ -16,32 +16,54 @@ class PromptOptimizer:
     4. 动态组合生成最优提示词
     """
 
-    def __init__(self):
+    def __init__(self, experience_buffer=None):
         """
         初始化提示词优化器
+
+        Args:
+            experience_buffer: ExperienceBuffer实例，用于few-shot学习
         """
+        self.experience_buffer = experience_buffer
         self.operator_templates = self._load_operator_templates()
         self.type_guidance = self._load_type_guidance()
 
     def build_dynamic_prompt(
         self,
         problem: str,
-        problem_type: str
+        problem_type: str,
+        use_few_shot: bool = False,
+        few_shot_k: int = 2,
+        similarity_threshold: float = 0.7
     ) -> str:
         """
         构建动态优化的提示词
-
+        
         Args:
             problem: 问题文本
             problem_type: 问题类型 (math/code/qa)
-
+            use_few_shot: 是否使用few-shot示例
+            few_shot_k: few-shot示例数量
+            similarity_threshold: 相似度阈值
+            
         Returns:
             优化后的完整提示词
         """
         # 1. 基础模板（完整7算子）
         base_template = self._get_full_operator_template()
 
-        # 2. 类型自适应指导
+        # 2. Few-shot示例（可选）
+        few_shot_section = ""
+        if use_few_shot and self.experience_buffer is not None:
+            few_shot_examples = self.experience_buffer.retrieve_top_k(
+                problem=problem,
+                problem_type=problem_type,
+                k=few_shot_k,
+                similarity_threshold=similarity_threshold
+            )
+            if len(few_shot_examples) > 0:
+                few_shot_section = self._format_few_shot_examples(few_shot_examples)
+
+        # 3. 类型自适应指导
         type_guidance_section = self.type_guidance.get(
             problem_type,
             self.type_guidance["qa"]  # 默认使用QA指导
@@ -61,8 +83,13 @@ class PromptOptimizer:
         # MUST return (solution, cost) tuple
         # Safe access: return solution.get('response', ''), self.llm.get_usage_summary().get("total_cost", 0.0)"""
 
-        # 3. 组合提示词
-        prompt = f"""Generate a Python Workflow class. Follow the exact template and API signatures.
+        # 4. 组合提示词
+        prompt = f"""Generate a Python Workflow class to solve the problem.
+
+IMPORTANT: First, ANALYZE the problem's difficulty and complexity.
+- Simple problems -> Use direct operators (AnswerGenerate, Programmer).
+- Complex problems -> Use robust workflows (Review, Revise, ScEnsemble).
+- YOU decide the best strategy. Do not over-engineer simple tasks.
 
 🚨 CRITICAL RULES FOR OPERATOR INITIALIZATION AND CALLS:
 
@@ -73,7 +100,7 @@ class PromptOptimizer:
    ❌ WRONG: self.custom = operator.custom(self.llm)
    ❌ WRONG: self.answer_generate = operator.answer_generate(self.llm)
 
-⚡ PERFORMANCE CRITICAL - AVOID REDUNDANT CALLS:
+98|⚡ PERFORMANCE CRITICAL - AVOID REDUNDANT CALLS:
    ✅ CORRECT: Cache operator results and reuse them
    result = await self.answer_generate(input=problem)
    answer = result.get('answer', '')
@@ -123,6 +150,8 @@ class PromptOptimizer:
 
 {type_guidance_section}
 
+{few_shot_section}
+
 Template (complete the __call__ method):
 
 import workspace.{problem_type}.workflows.template.operator as operator
@@ -134,7 +163,7 @@ class Workflow:
         self.name = name
         self.dataset = dataset
         self.llm = create_llm_instance(llm_config)
-        # Initialize operators you need, e.g.:
+        # Initialize operators you need (ONLY the ones you will use):
         # self.custom = operator.Custom(self.llm)
         # self.answer_generate = operator.AnswerGenerate(self.llm)
         # self.programmer = operator.Programmer(self.llm)
@@ -177,7 +206,7 @@ class Workflow:
     def _load_operator_templates(self) -> Dict:
         """
         加载operator模板定义
-
+        
         Returns:
             operator模板字典
         """
@@ -188,7 +217,7 @@ class Workflow:
                 "returns": "{'response': str}"
             },
             "AnswerGenerate": {
-                "description": "Step-by-step reasoning",
+                "description": "Step-by-step reasoning. Best for standard logical problems.",
                 "interface": "AnswerGenerate(input: str)",
                 "returns": "{'thought': str, 'answer': str}",
                 "example_call": "ans_result = await self.answer_generate(input=problem)\nanswer = ans_result.get('answer', '')  # Extract 'answer' not 'thought'",
@@ -196,19 +225,19 @@ class Workflow:
                 "note": "Returns dict with 'thought' (reasoning) and 'answer' (final result) - use 'answer' for final output"
             },
             "Programmer": {
-                "description": "Auto-generate and execute Python code",
+                "description": "Auto-generate and execute Python code. Essential for CODE problems and calculation-heavy tasks.",
                 "interface": "Programmer(problem: str, analysis: str)",
                 "returns": "{'code': str, 'output': str}",
                 "example_call": "prog_result = await self.programmer(problem=problem, analysis='Analyze and solve')\ncode = prog_result.get('code', '')  # Extract code string from dict",
                 "note": "Returns dict with 'code' key - must extract before passing to Test"
             },
             "ScEnsemble": {
-                "description": "Self-consistency ensemble",
+                "description": "Self-consistency ensemble. Use for complex reasoning where single attempt is unreliable.",
                 "interface": "ScEnsemble(solutions: List[str], problem: str)",
                 "returns": "{'response': str}"
             },
             "Test": {
-                "description": "Test the solution with test cases, if correct return 'no error'; if incorrect, reflect on the error",
+                "description": "Test the solution with test cases. CRITICAL for CODE problems. DO NOT use for QA.",
                 "interface": "Test(problem: str, solution: str, entry_point: str)",
                 "returns": "{'result': bool, 'solution': str}",
                 "note": "For HumanEval format - automatically extracts test cases using entry_point",
@@ -216,7 +245,7 @@ class Workflow:
                 "required_params": ["problem", "solution", "entry_point"]
             },
             "Review": {
-                "description": "Review and verify solution",
+                "description": "Review and verify solution. Use to check quality or catch errors in complex tasks.",
                 "interface": "Review(problem: str, solution: str)",
                 "returns": "{'review_result': str, 'feedback': str}",
                 "example_call": "review_result = await self.review(problem=problem, solution=code)\nfeedback = review_result.get('feedback', review_result.get('review_result', 'No feedback'))  # Handle multiple formats",
@@ -224,7 +253,7 @@ class Workflow:
                 "note": "May return 'feedback' OR 'review_result' key - use nested .get() for safety"
             },
             "Revise": {
-                "description": "Revise based on feedback",
+                "description": "Revise based on feedback. Use AFTER Review to fix issues.",
                 "interface": "Revise(problem: str, solution: str, feedback: str)",
                 "returns": "{'solution': str}",
                 "example_call": "revised = await self.revise(problem=problem, solution=code, feedback=feedback)\nrevised_code = revised.get('solution', code)  # Extract 'solution' with fallback",
@@ -236,7 +265,7 @@ class Workflow:
     def _load_type_guidance(self) -> Dict:
         """
         加载问题类型自适应指导
-
+        
         Returns:
             类型指导字典
         """
@@ -244,10 +273,12 @@ class Workflow:
             "math": """
 ✅ MATH Problem Requirements:
 - Return final answer in \\boxed{} notation
-- You may use AnswerGenerate, Programmer, Test, Review, Revise operators
+- STRATEGY: 
+  * For standard calculations -> Use Programmer
+  * For logical reasoning -> Use AnswerGenerate
+  * For complex/ambiguous problems -> Use Review/Revise
 - IMPORTANT: If using Test operator, MUST call with ALL parameters:
     result = await self.test(problem=problem, solution=solution, entry_point="solve")
-- Choose operators based on problem requirements
 """,
             "code": """
 🚨🚨🚨 CRITICAL - CODE WORKFLOW SIGNATURE 🚨🚨🚨
@@ -299,13 +330,13 @@ async def __call__(self, problem: str, entry_point: str, test: str):
     if not test_result.get('result', False):
         review_result = await self.review(problem=problem, solution=code)
         feedback = review_result.get('feedback', review_result.get('review_result', 'Review completed'))
-
+        
         revised = await self.revise(problem=problem, solution=code, feedback=feedback)
         final_code = revised.get('solution', code)
-
+        
         # Optional: Test revised code (remove if time is critical)
         # final_test = await self.test(problem=problem, solution=final_code, entry_point=entry_point)
-
+        
         return final_code, self.llm.get_usage_summary()["total_cost"]
 
     return code, self.llm.get_usage_summary()["total_cost"]
@@ -323,13 +354,74 @@ async def __call__(self, problem: str, entry_point: str, test: str):
             "qa": """
 ✅ QA Problem Requirements:
 - Provide accurate and concise answers
-- You may use AnswerGenerate, Custom, Review operators
+- STRATEGY:
+  * For simple questions -> Use AnswerGenerate directly
+  * For complex/reasoning questions -> Use AnswerGenerate then Review
 - IMPORTANT: DO NOT call Test operator for QA problems (they don't have test cases)
 - If using Test operator with custom test, MUST call with ALL parameters:
     result = await self.test(problem=problem, solution=answer, entry_point="execute")
 - Choose operators based on problem complexity
 """
         }
+
+    def _format_few_shot_examples(self, examples: List[Dict]) -> str:
+        """
+        格式化few-shot示例
+
+        Args:
+            examples: 样本列表
+
+        Returns:
+            格式化的few-shot示例文本
+        """
+        if len(examples) == 0:
+            return ""
+
+        few_shot_text = "\n" + "="*70 + "\n"
+        few_shot_text += "📚 HIGH-QUALITY WORKFLOW EXAMPLES (Learn from these successful cases!)\n"
+        few_shot_text += "="*70 + "\n\n"
+
+        for i, example in enumerate(examples, 1):
+            problem = example.get('problem', '')[:150]
+            workflow_code = example.get('workflow_code', '')
+            reward = example.get('reward', 0)
+
+            # Extract key workflow pattern
+            workflow_snippet = self._extract_workflow_snippet(workflow_code)
+
+            few_shot_text += f"Example {i} (Reward: {reward:.1f}/10.0):\n"
+            few_shot_text += f"Problem: {problem}...\n"
+            few_shot_text += f"Workflow Pattern:\n{workflow_snippet}\n"
+            few_shot_text += f"Result: ✅ Correct\n\n"
+
+        few_shot_text += "="*70 + "\n"
+        few_shot_text += "💡 Learn from these patterns and adapt them to your problem!\n"
+        few_shot_text += "="*70 + "\n\n"
+
+        return few_shot_text
+
+    def _extract_workflow_snippet(self, workflow_code: str) -> str:
+        """Extract key workflow pattern from full code"""
+        if not workflow_code:
+            return "(No workflow code available)"
+
+        lines = workflow_code.split('\n')
+        snippet_lines = []
+        in_call_method = False
+
+        for line in lines:
+            if 'def __call__' in line:
+                in_call_method = True
+            if in_call_method:
+                # Extract operator calls
+                if 'await self.' in line or 'return' in line:
+                    snippet_lines.append(line.strip())
+                if len(snippet_lines) >= 8:  # Limit to 8 key lines
+                    break
+
+        if snippet_lines:
+            return '\n'.join(snippet_lines)
+        return workflow_code[:300] + "..."
 
     def get_operator_count(self, workflow_code: str) -> Dict[str, int]:
         """

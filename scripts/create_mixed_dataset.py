@@ -1,384 +1,280 @@
 #!/usr/bin/env python3
 """
-创建混合数据集：
-- 训练集：从各数据集的训练数据中采样
-- 验证集：从测试集中按相同比例采样
-- 小样本数据集全部保留
+创建混合数据集（训练+测试，不包含验证集）
+按照 math:qa:code = 4:3:3 的比例
 """
 
 import json
 import random
 from pathlib import Path
-from typing import Dict, List, Any
 from collections import defaultdict
 
-def load_jsonl(file_path: Path) -> List[Dict[str, Any]]:
-    """加载JSONL文件"""
-    data = []
-    with open(file_path, 'r', encoding='utf-8') as f:
-        for line in f:
-            if line.strip():
-                data.append(json.loads(line))
-    return data
+# 设置随机种子
+random.seed(42)
 
-def load_json(file_path: Path) -> List[Dict[str, Any]]:
-    """加载JSON文件"""
-    with open(file_path, 'r', encoding='utf-8') as f:
-        data = json.load(f)
-        if isinstance(data, dict) and 'data' in data:
-            return data['data']
-        elif isinstance(data, list):
-            return data
-        else:
-            return [data]
+# 配置
+ratios = {
+    'math': 0.4,  # 40%
+    'qa': 0.3,    # 30%
+    'code': 0.3   # 30%
+}
 
-def convert_to_unified_format(sample: Dict[str, Any], source: str, problem_type: str) -> Dict[str, Any]:
-    """转换为统一格式"""
-    unified = {
-        'source': source,
-        'problem_type': problem_type,
-    }
+data_sources = {
+    'math': [
+        ('data/gsm8k/train.jsonl', 'gsm8k'),
+        ('data/raw/gsm8k/train.jsonl', 'gsm8k'),
+        ('data/raw/gsm8k/test.jsonl', 'gsm8k'),
+    ],
+    'code': [
+        ('data/mbpp/train.jsonl', 'mbpp'),
+        ('data/humaneval/humaneval_full.jsonl', 'humaneval'),
+        ('data/humaneval/humaneval_validate.jsonl', 'humaneval'),
+        ('data/humaneval/humaneval_test.jsonl', 'humaneval'),
+        ('data/processed/test_mixed.jsonl', 'humaneval'),  # 包含100个humaneval样本
+    ],
+    'qa': [
+        ('data/raw/commonsenseqa/train.jsonl', 'commonsenseqa'),
+        ('data/raw/commonsenseqa/dev.jsonl', 'commonsenseqa'),
+        ('data/raw/commonsenseqa/test.jsonl', 'commonsenseqa'),
+        ('data/hotpotqa/train.jsonl', 'hotpotqa'),
+        ('data/drop/train.jsonl', 'drop'),
+    ],
+    'mixed': [
+        ('data/raw/mmlu/auxiliary_train.jsonl', 'mmlu'),
+        ('data/raw/mmlu/test.jsonl', 'mmlu'),
+        ('data/raw/mmlu/validation.jsonl', 'mmlu'),
+    ]
+}
 
-    # GSM8K
-    if source == 'gsm8k':
-        unified['problem'] = sample.get('question', '')
-        answer = sample.get('answer', '')
-        if '####' in answer:
-            unified['ground_truth'] = answer.split('####')[-1].strip()
-            unified['solution'] = answer
-        else:
-            unified['ground_truth'] = answer
-            unified['solution'] = answer
+def load_dataset(file_path, source_name, problem_type):
+    """加载数据集并标准化格式"""
+    samples = []
+    path = Path(file_path)
 
-    # HumanEval
-    elif source == 'humaneval':
-        unified['problem'] = sample.get('prompt', '')
-        unified['ground_truth'] = sample.get('canonical_solution', '')
-        unified['entry_point'] = sample.get('entry_point', '')
-        unified['test'] = sample.get('test', '')
-        unified['task_id'] = sample.get('task_id', '')
+    if not path.exists():
+        print(f"  ⚠️  文件不存在: {file_path}")
+        return samples
 
-    # MBPP
-    elif source == 'mbpp':
-        unified['problem'] = sample.get('text', sample.get('prompt', ''))
-        unified['ground_truth'] = sample.get('code', '')
-        unified['test_list'] = sample.get('test_list', [])
-        unified['task_id'] = sample.get('task_id', '')
+    with open(path, 'r', encoding='utf-8') as f:
+        for line_num, line in enumerate(f, 1):
+            if not line.strip():
+                continue
+            try:
+                sample = json.loads(line)
 
-    # CommonsenseQA
-    elif source == 'commonsenseqa':
-        question = sample.get('question', {})
-        if isinstance(question, dict):
-            question_text = question.get('stem', '')
-        else:
-            question_text = str(question)
+                # 标准化字段
+                if 'source' not in sample:
+                    sample['source'] = source_name
+                if 'problem_type' not in sample:
+                    sample['problem_type'] = problem_type
 
-        # 从question中提取choices
-        if isinstance(question, dict) and 'choices' in question:
-            choices_list = question.get('choices', [])
-            if isinstance(choices_list, list) and len(choices_list) > 0:
-                # choices是一个list of dicts
-                labels = [c.get('label', '') for c in choices_list]
-                texts = [c.get('text', '') for c in choices_list]
-                choices_str = ' '.join([f"{l}. {t}" for l, t in zip(labels, texts)])
-                choices_dict = {'label': labels, 'text': texts}
-            else:
-                choices_str = ''
-                choices_dict = {}
-        else:
-            choices_str = ''
-            choices_dict = {}
+                # 处理HumanEval特殊格式
+                if source_name == 'humaneval':
+                    if 'problem' not in sample and 'prompt' in sample:
+                        sample['problem'] = sample['prompt']
+                    if 'ground_truth' not in sample and 'canonical_solution' in sample:
+                        sample['ground_truth'] = sample['canonical_solution']
 
-        unified['problem'] = f"{question_text} Choices: {choices_str}"
-        unified['ground_truth'] = sample.get('answerKey', '')
-        unified['choices'] = choices_dict
+                # 处理GSM8K格式
+                elif source_name == 'gsm8k':
+                    if 'problem' not in sample and 'question' in sample:
+                        sample['problem'] = sample['question']
+                    if 'ground_truth' not in sample and 'answer' in sample:
+                        sample['ground_truth'] = sample['answer']
 
-    # HotpotQA
-    elif source == 'hotpotqa':
-        unified['problem'] = sample.get('question', '')
-        unified['ground_truth'] = sample.get('answer', '')
-        unified['supporting_facts'] = sample.get('supporting_facts', [])
+                # 处理CommonsenseQA格式
+                elif source_name == 'commonsenseqa':
+                    if 'problem' not in sample and 'question' in sample:
+                        # 构建问题文本，包含选项
+                        question_text = sample['question'].get('stem', '')
+                        if 'choices' in sample['question']:
+                            choices_text = '\n'.join([f"{c['label']}: {c['text']}"
+                                                      for c in sample['question']['choices']])
+                            sample['problem'] = f"{question_text}\n{choices_text}"
+                        else:
+                            sample['problem'] = question_text
+                    if 'ground_truth' not in sample and 'answerKey' in sample:
+                        sample['ground_truth'] = sample['answerKey']
 
-    # MMLU
-    elif source == 'mmlu':
-        question = sample.get('question', '')
-        choices = sample.get('choices', [])
-        if choices:
-            choices_str = ' '.join([f"{chr(65+i)}. {c}" for i, c in enumerate(choices)])
-            unified['problem'] = f"{question} Choices: {choices_str}"
-        else:
-            unified['problem'] = question
+                # 确保必要字段存在
+                if 'problem' in sample and 'ground_truth' in sample:
+                    samples.append(sample)
 
-        # MMLU的答案是数字索引，需要转换为字母
-        answer = sample.get('answer', '')
-        if isinstance(answer, int) and 0 <= answer < 26:
-            unified['ground_truth'] = chr(65 + answer)  # 0->A, 1->B, etc.
-        else:
-            unified['ground_truth'] = str(answer)
+            except json.JSONDecodeError:
+                print(f"  ⚠️  JSON解析错误: {file_path} 第{line_num}行")
+            except Exception as e:
+                print(f"  ⚠️  处理错误: {file_path} 第{line_num}行: {e}")
 
-        unified['subject'] = sample.get('subject', '')
-        unified['choices'] = choices  # 保存原始choices列表
+    return samples
 
-    return unified
-
-def create_mixed_dataset(
-    raw_dir: Path,
-    output_dir: Path,
-    train_size: int = 10000,
-    keep_small_threshold: int = 500,
-    seed: int = 42
-):
-    """创建混合数据集"""
-    random.seed(seed)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    # 类型比例配置
-    type_ratios = {
-        'math': 0.20,
-        'code': 0.20,
-        'qa': 0.30,
-        'mixed': 0.30
-    }
-
+def main():
     print("="*60)
-    print("创建混合数据集")
+    print("创建混合数据集（训练+测试）")
     print("="*60)
 
-    # 存储训练和测试数据
-    train_samples_by_type = defaultdict(list)
-    test_samples_by_type = defaultdict(list)
-    dataset_stats = defaultdict(lambda: {'train': 0, 'test': 0})
+    # 收集所有数据
+    all_data = defaultdict(list)
+    source_stats = defaultdict(lambda: defaultdict(int))
 
-    print("\n加载数据集...")
-
-    # GSM8K
-    gsm8k_train = raw_dir / 'gsm8k' / 'train.jsonl'
-    gsm8k_test = raw_dir / 'gsm8k' / 'test.jsonl'
-    if gsm8k_train.exists():
-        for sample in load_jsonl(gsm8k_train):
-            unified = convert_to_unified_format(sample, 'gsm8k', 'math')
-            train_samples_by_type['math'].append(unified)
-            dataset_stats['gsm8k']['train'] += 1
-    if gsm8k_test.exists():
-        for sample in load_jsonl(gsm8k_test):
-            unified = convert_to_unified_format(sample, 'gsm8k', 'math')
-            test_samples_by_type['math'].append(unified)
-            dataset_stats['gsm8k']['test'] += 1
-    print(f"  GSM8K: train={dataset_stats['gsm8k']['train']}, test={dataset_stats['gsm8k']['test']}")
-
-    # HumanEval (只有测试集)
-    humaneval_file = raw_dir / 'humaneval' / 'HumanEval.jsonl'
-    if humaneval_file.exists():
-        data = load_jsonl(humaneval_file)
-        # 小样本，全部作为测试集
-        for sample in data:
-            unified = convert_to_unified_format(sample, 'humaneval', 'code')
-            test_samples_by_type['code'].append(unified)
-            dataset_stats['humaneval']['test'] += 1
-    print(f"  HumanEval: test={dataset_stats['humaneval']['test']}")
-
-    # MBPP
-    mbpp_train = raw_dir / 'mbpp' / 'train.jsonl'
-    mbpp_test = raw_dir / 'mbpp' / 'test.jsonl'
-    mbpp_val = raw_dir / 'mbpp' / 'validation.jsonl'
-
-    if mbpp_train.exists():
-        for sample in load_jsonl(mbpp_train):
-            unified = convert_to_unified_format(sample, 'mbpp', 'code')
-            train_samples_by_type['code'].append(unified)
-            dataset_stats['mbpp']['train'] += 1
-
-    # MBPP的test和validation都算作测试集
-    if mbpp_test.exists():
-        for sample in load_jsonl(mbpp_test):
-            unified = convert_to_unified_format(sample, 'mbpp', 'code')
-            test_samples_by_type['code'].append(unified)
-            dataset_stats['mbpp']['test'] += 1
-    if mbpp_val.exists():
-        for sample in load_jsonl(mbpp_val):
-            unified = convert_to_unified_format(sample, 'mbpp', 'code')
-            test_samples_by_type['code'].append(unified)
-            dataset_stats['mbpp']['test'] += 1
-    print(f"  MBPP: train={dataset_stats['mbpp']['train']}, test={dataset_stats['mbpp']['test']}")
-
-    # CommonsenseQA
-    csqa_train = raw_dir / 'commonsenseqa' / 'train.jsonl'
-    csqa_test = raw_dir / 'commonsenseqa' / 'test.jsonl'
-    if csqa_train.exists():
-        for sample in load_jsonl(csqa_train):
-            unified = convert_to_unified_format(sample, 'commonsenseqa', 'qa')
-            train_samples_by_type['qa'].append(unified)
-            dataset_stats['commonsenseqa']['train'] += 1
-    if csqa_test.exists():
-        for sample in load_jsonl(csqa_test):
-            unified = convert_to_unified_format(sample, 'commonsenseqa', 'qa')
-            test_samples_by_type['qa'].append(unified)
-            dataset_stats['commonsenseqa']['test'] += 1
-    print(f"  CommonsenseQA: train={dataset_stats['commonsenseqa']['train']}, test={dataset_stats['commonsenseqa']['test']}")
-
-    # HotpotQA (只有dev)
-    hotpot_file = raw_dir / 'hotpotqa' / 'dev_distractor.json'
-    if hotpot_file.exists():
-        data = load_json(hotpot_file)
-        # 分一半作为训练，一半作为测试
-        random.shuffle(data)
-        split_point = len(data) // 2
-        for sample in data[:split_point]:
-            unified = convert_to_unified_format(sample, 'hotpotqa', 'qa')
-            train_samples_by_type['qa'].append(unified)
-            dataset_stats['hotpotqa']['train'] += 1
-        for sample in data[split_point:]:
-            unified = convert_to_unified_format(sample, 'hotpotqa', 'qa')
-            test_samples_by_type['qa'].append(unified)
-            dataset_stats['hotpotqa']['test'] += 1
-    print(f"  HotpotQA: train={dataset_stats['hotpotqa']['train']}, test={dataset_stats['hotpotqa']['test']}")
-
-    # MMLU
-    mmlu_train = raw_dir / 'mmlu' / 'auxiliary_train.jsonl'
-    mmlu_test = raw_dir / 'mmlu' / 'test.jsonl'
-    if mmlu_train.exists():
-        for sample in load_jsonl(mmlu_train):
-            unified = convert_to_unified_format(sample, 'mmlu', 'mixed')
-            train_samples_by_type['mixed'].append(unified)
-            dataset_stats['mmlu']['train'] += 1
-    if mmlu_test.exists():
-        for sample in load_jsonl(mmlu_test):
-            unified = convert_to_unified_format(sample, 'mmlu', 'mixed')
-            test_samples_by_type['mixed'].append(unified)
-            dataset_stats['mmlu']['test'] += 1
-    print(f"  MMLU: train={dataset_stats['mmlu']['train']}, test={dataset_stats['mmlu']['test']}")
+    # 加载所有数据集
+    for problem_type, sources in data_sources.items():
+        print(f"\n加载 {problem_type} 类型数据:")
+        for file_path, source_name in sources:
+            samples = load_dataset(file_path, source_name, problem_type)
+            if samples:
+                all_data[problem_type].extend(samples)
+                source_stats[problem_type][source_name] += len(samples)
+                print(f"  ✅ {source_name}: {len(samples)} 样本")
 
     # 统计信息
-    print("\n数据集总计:")
-    for ptype in ['math', 'code', 'qa', 'mixed']:
-        train_count = len(train_samples_by_type[ptype])
-        test_count = len(test_samples_by_type[ptype])
-        print(f"  {ptype}: train={train_count}, test={test_count}")
+    print("\n" + "="*60)
+    print("数据统计:")
+    for problem_type, sources in source_stats.items():
+        total = sum(sources.values())
+        print(f"\n{problem_type} 类型 (总计: {total}):")
+        for source, count in sorted(sources.items()):
+            print(f"  - {source}: {count}")
 
-    # 创建训练集
-    print(f"\n创建训练集（目标: {train_size}个样本）...")
-    train_samples = []
-    train_distribution = {}
+    # 计算目标样本数，确保比例为 math:qa:code = 4:3:3
+    # 先统计每种类型的可用样本数
+    available_counts = {}
+    for problem_type in ['math', 'code', 'qa']:
+        available_counts[problem_type] = len(all_data.get(problem_type, []))
 
-    for ptype, ratio in type_ratios.items():
-        target = int(train_size * ratio)
-        available = len(train_samples_by_type[ptype])
+    print("\n可用样本数:")
+    for ptype, count in available_counts.items():
+        print(f"  {ptype}: {count}")
 
-        if available <= keep_small_threshold:
-            # 小数据集全部保留
-            sampled = train_samples_by_type[ptype]
-            print(f"  {ptype}: 保留全部 {len(sampled)} 个样本（小数据集）")
-        else:
-            # 大数据集采样
-            sample_count = min(target, available)
-            sampled = random.sample(train_samples_by_type[ptype], sample_count)
-            print(f"  {ptype}: 采样 {len(sampled)}/{available} 个样本")
-
-        train_samples.extend(sampled)
-        train_distribution[ptype] = len(sampled)
-
-    random.shuffle(train_samples)
-    print(f"\n训练集总计: {len(train_samples)} 个样本")
-
-    # 创建验证集（从测试集中按相同比例采样）
-    print("\n创建验证集（从测试集采样，保持相同比例）...")
-    val_samples = []
-    val_distribution = {}
-
-    # 计算每个类型在训练集中的实际比例
-    actual_ratios = {}
-    for ptype in type_ratios.keys():
-        actual_ratios[ptype] = train_distribution[ptype] / len(train_samples)
-
-    # 目标验证集大小（训练集的10%）
-    val_size = int(len(train_samples) * 0.1)
-
-    for ptype, ratio in actual_ratios.items():
-        target = int(val_size * ratio)
-        available = len(test_samples_by_type[ptype])
-
-        if available == 0:
-            print(f"  {ptype}: 无测试数据可用")
-            continue
-
-        if available <= keep_small_threshold:
-            # 小数据集全部用作验证
-            sampled = test_samples_by_type[ptype]
-            print(f"  {ptype}: 保留全部 {len(sampled)} 个样本（小数据集）")
-        else:
-            # 按比例采样
-            sample_count = min(target, available)
-            sampled = random.sample(test_samples_by_type[ptype], sample_count)
-            print(f"  {ptype}: 采样 {len(sampled)}/{available} 个样本（比例: {ratio:.1%}）")
-
-        val_samples.extend(sampled)
-        val_distribution[ptype] = len(sampled)
-
-    random.shuffle(val_samples)
-    print(f"\n验证集总计: {len(val_samples)} 个样本")
-
-    # 保存数据集
-    print("\n保存数据集...")
-
-    train_file = output_dir / 'train_mixed.jsonl'
-    with open(train_file, 'w', encoding='utf-8') as f:
-        for sample in train_samples:
-            f.write(json.dumps(sample, ensure_ascii=False) + '\n')
-    print(f"  训练集: {train_file}")
-
-    val_file = output_dir / 'val_mixed.jsonl'
-    with open(val_file, 'w', encoding='utf-8') as f:
-        for sample in val_samples:
-            f.write(json.dumps(sample, ensure_ascii=False) + '\n')
-    print(f"  验证集: {val_file}")
-
-    # 保存统计信息
-    stats = {
-        'train_size': len(train_samples),
-        'val_size': len(val_samples),
-        'train_distribution': train_distribution,
-        'val_distribution': val_distribution,
-        'train_ratios': {k: v/len(train_samples) for k, v in train_distribution.items()},
-        'val_ratios': {k: v/len(val_samples) for k, v in val_distribution.items()},
-        'dataset_stats': dict(dataset_stats),
-        'config': {
-            'target_train_size': train_size,
-            'keep_small_threshold': keep_small_threshold,
-            'seed': seed,
-            'type_ratios': type_ratios
-        }
+    # 设定目标比例和总样本数
+    # 由于code样本很少，我们将进行大量复制
+    target_samples = {
+        'math': 8000,  # 40%
+        'qa': 6000,    # 30%
+        'code': 6000   # 30% - 需要大量复制
     }
 
-    stats_file = output_dir / 'dataset_stats.json'
-    with open(stats_file, 'w', encoding='utf-8') as f:
-        json.dump(stats, f, indent=2, ensure_ascii=False)
-    print(f"  统计信息: {stats_file}")
+    print("\n目标样本数:")
+    for ptype, count in target_samples.items():
+        print(f"  {ptype}: {count} (需要{count/available_counts.get(ptype, 1):.1f}倍)")
 
-    # 打印最终分布
-    print("\n=" * 60)
-    print("最终数据集分布")
-    print("=" * 60)
-    print(f"\n训练集 ({len(train_samples)} 个样本):")
-    for ptype, count in sorted(train_distribution.items()):
-        ratio = count / len(train_samples) * 100
-        print(f"  {ptype:8s}: {count:5d} ({ratio:5.1f}%)")
+    # 创建训练集和测试集
+    train_ratio = 0.9  # 90% for training
+    test_ratio = 0.1   # 10% for testing
 
-    print(f"\n验证集 ({len(val_samples)} 个样本):")
-    for ptype, count in sorted(val_distribution.items()):
-        ratio = count / len(val_samples) * 100 if len(val_samples) > 0 else 0
-        print(f"  {ptype:8s}: {count:5d} ({ratio:5.1f}%)")
+    train_data = []
+    test_data = []
 
-    print(f"\n数据集保存位置: {output_dir.absolute()}")
+    print("\n" + "="*60)
+    print("创建数据集:")
+
+    # 对每种类型的数据进行处理
+    for problem_type in ['math', 'qa', 'code']:
+        if problem_type in all_data:
+            samples = all_data[problem_type]
+            random.shuffle(samples)
+
+            # 处理样本数量
+            if len(samples) < target_samples[problem_type]:
+                print(f"\n⚠️  {problem_type} 样本不足 ({len(samples)} < {target_samples[problem_type]})，进行复制...")
+                original_count = len(samples)
+                # 计算需要复制的倍数
+                multiplication_factor = (target_samples[problem_type] + original_count - 1) // original_count
+                # 复制样本
+                expanded_samples = []
+                for i in range(multiplication_factor):
+                    # 为每个复制添加标记以区分
+                    for sample in samples:
+                        sample_copy = sample.copy()
+                        sample_copy['duplication_id'] = i
+                        expanded_samples.append(sample_copy)
+                random.shuffle(expanded_samples)
+                samples = expanded_samples[:target_samples[problem_type]]
+                print(f"  原始: {original_count}, 复制{multiplication_factor}倍后: {len(samples)}")
+            else:
+                # 如果样本充足，只取需要的数量
+                samples = samples[:target_samples[problem_type]]
+
+            # 分割为训练集和测试集
+            split_point = int(len(samples) * train_ratio)
+            train_samples = samples[:split_point]
+            test_samples = samples[split_point:]
+
+            train_data.extend(train_samples)
+            test_data.extend(test_samples)
+
+            print(f"\n{problem_type}:")
+            print(f"  训练集: {len(train_samples)} 样本")
+            print(f"  测试集: {len(test_samples)} 样本")
+
+    # 添加mixed类型（如果需要，可以按比例分配到其他类型）
+    if 'mixed' in all_data:
+        samples = all_data['mixed']
+        random.shuffle(samples)
+
+        # 将mixed类型按比例分配到train和test
+        split_point = int(len(samples) * train_ratio)
+        train_samples = samples[:split_point]
+        test_samples = samples[split_point:]
+
+        train_data.extend(train_samples)
+        test_data.extend(test_samples)
+
+        print(f"\nmixed:")
+        print(f"  训练集: {len(train_samples)} 样本")
+        print(f"  测试集: {len(test_samples)} 样本")
+
+    # 打乱数据
+    random.shuffle(train_data)
+    random.shuffle(test_data)
+
+    # 保存数据集
+    print("\n" + "="*60)
+    print("保存数据集:")
+
+    # 创建输出目录
+    output_dir = Path('data/final_mixed')
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # 保存训练集
+    train_file = output_dir / 'train.jsonl'
+    with open(train_file, 'w', encoding='utf-8') as f:
+        for sample in train_data:
+            f.write(json.dumps(sample, ensure_ascii=False) + '\n')
+    print(f"  ✅ 训练集: {train_file} ({len(train_data)} 样本)")
+
+    # 保存测试集
+    test_file = output_dir / 'test.jsonl'
+    with open(test_file, 'w', encoding='utf-8') as f:
+        for sample in test_data:
+            f.write(json.dumps(sample, ensure_ascii=False) + '\n')
+    print(f"  ✅ 测试集: {test_file} ({len(test_data)} 样本)")
+
+    # 分析最终分布
+    print("\n" + "="*60)
+    print("最终数据分布:")
+
+    for dataset_name, dataset in [('训练集', train_data), ('测试集', test_data)]:
+        type_counts = defaultdict(int)
+        source_counts = defaultdict(int)
+
+        for sample in dataset:
+            type_counts[sample.get('problem_type', 'unknown')] += 1
+            source_counts[sample.get('source', 'unknown')] += 1
+
+        print(f"\n{dataset_name} (共 {len(dataset)} 样本):")
+        print("  按类型:")
+        for ptype, count in sorted(type_counts.items()):
+            percentage = count / len(dataset) * 100
+            print(f"    {ptype}: {count} ({percentage:.1f}%)")
+
+        print("  按来源:")
+        for source, count in sorted(source_counts.items()):
+            percentage = count / len(dataset) * 100
+            print(f"    {source}: {count} ({percentage:.1f}%)")
+
+    print("\n" + "="*60)
+    print("✅ 混合数据集创建完成！")
     print("="*60)
 
 if __name__ == '__main__':
-    raw_dir = Path('data/raw')
-    output_dir = Path('data/mixed')
-
-    create_mixed_dataset(
-        raw_dir=raw_dir,
-        output_dir=output_dir,
-        train_size=10000,
-        keep_small_threshold=500,
-        seed=42
-    )
+    main()

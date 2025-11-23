@@ -67,26 +67,15 @@ models/
 *.onnx
 *.tflite
 
-# Large dataset files (>50MB)
-data/train/mixed_dataset.jsonl
-data/test/mixed_dataset.jsonl
-data/val/mixed_dataset.jsonl
-data/raw/mmlu/auxiliary_train.jsonl
-data/raw/hotpotqa/dev_distractor.json
+# Archive and backup directories
+archive/
+clean_version/
+github_ready_version/
 
-# All data files - users should download via scripts
-data/mixed/*.jsonl
-data/gsm8k/*.jsonl
-data/humaneval/*.jsonl
-data/raw/**/*.jsonl
-data/raw/**/*.json
-data/processed/*.jsonl
-data/experience_buffer/*.jsonl
-data/drop/*.jsonl
-data/hotpotqa/*.jsonl
-data/mbpp/*.jsonl
-*.jsonl.gz
+# Checkpoints directory (models)
+checkpoints
+checkpoints/
 
-# Keep only dataset metadata and scripts
-!data/mixed/README.md
-!data/mixed/dataset_stats.json
+# Chinese named files
+*数据集*.md
+*训练*.md

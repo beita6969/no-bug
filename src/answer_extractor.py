@@ -49,9 +49,10 @@ class AnswerExtractor:
         策略（参考AgentFlow）:
         1. <answer>标签（取最后一个）
         2. \boxed{}（LaTeX格式）
-        3. 明确的"Final Answer"标记
-        4. 对于ground_truth: 使用LLM理解复杂文本
-        5. 兜底：提取最后一个数字
+        3. GSM8K的#### 格式（适配特定数据集）
+        4. 明确的"Final Answer"标记
+        5. 对于ground_truth: 使用LLM理解复杂文本
+        6. 兜底：提取最后一个数字
         """
         text = str(text).strip()
 
@@ -68,12 +69,48 @@ class AnswerExtractor:
             if clean_text != text:
                 text = clean_text
 
-        # 2. 提取\boxed{}（标准LaTeX格式）
+        # 2. 提取\boxed{}（标准LaTeX格式）- 增强检测代码泄漏和错误
         boxed = self._extract_boxed(text)
         if boxed:
-            return self._clean_math_answer(boxed)
+            # 检测空输出（最先检查）
+            if not boxed or boxed.strip() == '':
+                # 空输出，继续尝试其他提取方法
+                boxed = None
+            # 检测代码块标记：如果包含```python或```，说明是代码块而非答案
+            elif '```python' in boxed or boxed.startswith('```'):
+                # 策略1：尝试执行代码获取答案（仅对math问题）
+                executed_answer = self._execute_code_and_extract_answer(boxed, 'math')
+                if executed_answer:
+                    return executed_answer
 
-        # 3. 查找明确的"Final Answer"标记
+                # 策略2：静态分析提取答案
+                code_answer = self._extract_answer_from_code_block(boxed)
+                if code_answer:
+                    return code_answer
+                # 无法提取，跳过
+                boxed = None
+            # 检测代码泄漏：如果boxed中包含def/return/import等关键字，跳过
+            elif any(keyword in boxed for keyword in ['def ', 'return ', 'import ', 'class ', 'if __name__']):
+                # 代码泄漏，继续尝试其他提取方法
+                boxed = None
+            # 检测执行错误：如果是Error信息，跳过
+            elif boxed.startswith('Error:') or 'Traceback' in boxed or 'SyntaxError' in boxed:
+                # 执行错误，继续尝试其他提取方法
+                boxed = None
+            # 检测无效输出
+            elif boxed.startswith('Based on the feedback') or boxed.startswith('Revised Solution'):
+                # 无效输出，跳过
+                boxed = None
+            else:
+                return self._clean_math_answer(boxed)
+
+        # 3. GSM8K格式：提取#### 后的数字（适配特定数据集）
+        if is_ground_truth:
+            gsm8k_match = re.search(r'####\s*(-?\d+\.?\d*)', text)
+            if gsm8k_match:
+                return self._clean_math_answer(gsm8k_match.group(1))
+
+        # 4. 查找明确的"Final Answer"标记
         final_answer_patterns = [
             r"(?:the\s+final\s+answer\s+is)[：:]*\s*([-+]?\d+(?:/\d+)?(?:\.\d+)?)",
             r"(?:Final\s+Answer|最终答案)[：:]*\s*([-+]?\d+(?:/\d+)?(?:\.\d+)?)",
@@ -191,8 +228,15 @@ class AnswerExtractor:
         提取QA答案
         - 对于数值型问题: 提取最终数字答案
         - 对于文本型问题: 标准化文本
+        - 对于选项题: 统一格式为单字母（A/B/C/D/E）
         """
         text = str(text).strip()
+
+        # 0. 选项题标准化（优先处理）
+        # 如果答案看起来像选项格式，标准化为单字母
+        option_answer = self._normalize_option_answer(text)
+        if option_answer:
+            return option_answer
 
         # 1. 如果有明确的答案标记，先尝试提取
         answer_patterns = [
@@ -205,6 +249,10 @@ class AnswerExtractor:
             match = re.search(pattern, text, re.IGNORECASE)
             if match:
                 answer_text = match.group(1).strip()
+                # 再次检查是否是选项格式
+                option_normalized = self._normalize_option_answer(answer_text)
+                if option_normalized:
+                    return option_normalized
                 # 尝试从答案文本中提取数字
                 numbers = self._extract_all_numbers(answer_text)
                 if numbers:
@@ -235,6 +283,191 @@ class AnswerExtractor:
                 return self._normalize_qa_answer(key_text)
 
         return normalized
+
+    def _normalize_option_answer(self, text: str) -> Optional[str]:
+        """标准化选项答案为单字母格式
+
+        支持的格式：
+        - "A" → "A"
+        - "A." → "A"
+        - "A. ream" → "A"
+        - "ream" (如果没有其他线索) → None
+        - "Option A" → "A"
+        - "(A)" → "A"
+        """
+        text = text.strip()
+
+        # 格式1: 单个大写字母
+        if len(text) == 1 and text.upper() in 'ABCDE':
+            return text.upper()
+
+        # 格式2: "A." 或 "A:" 或 "(A)"
+        match = re.match(r'^[\(\[]?([A-E])[\)\]\.:]*\s*', text, re.IGNORECASE)
+        if match:
+            return match.group(1).upper()
+
+        # 格式3: "Option A" 或 "选项A"
+        match = re.search(r'(?:Option|选项)\s*([A-E])\b', text, re.IGNORECASE)
+        if match:
+            return match.group(1).upper()
+
+        # 格式4: "The answer is A"
+        match = re.search(r'\b([A-E])\b(?=\s*(?:is|为)\s*(?:correct|the answer)?)', text, re.IGNORECASE)
+        if match:
+            return match.group(1).upper()
+
+        return None
+
+    def _execute_code_and_extract_answer(self, code_block: str, problem_type: str) -> Optional[str]:
+        """执行代码并提取答案（用于数学问题）
+
+        Args:
+            code_block: 代码块文本
+            problem_type: 问题类型（只对math问题执行代码）
+
+        Returns:
+            执行结果或None
+        """
+        # 只对math问题执行代码
+        if problem_type != "math":
+            return None
+
+        import subprocess
+        import tempfile
+        import os
+
+        # 移除代码块标记
+        code = re.sub(r'^```python\n?', '', code_block)
+        code = re.sub(r'```$', '', code)
+        code = code.strip()
+
+        # 安全检查：拒绝危险操作
+        dangerous_keywords = ['os.system', 'subprocess', 'eval', 'exec', 'open', '__import__', 'rm ', 'del ']
+        if any(kw in code for kw in dangerous_keywords):
+            return None
+
+        try:
+            # 创建临时文件
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+                # 修改代码：捕获最后的表达式结果
+                # 如果代码包含print，直接运行
+                # 如果代码只有计算，添加print输出最后的变量
+                if 'print(' not in code:
+                    # 查找最后的赋值语句
+                    lines = code.split('\n')
+                    last_var = None
+                    for line in reversed(lines):
+                        line = line.strip()
+                        if '=' in line and not line.startswith('#'):
+                            # 提取变量名
+                            var_name = line.split('=')[0].strip()
+                            if var_name.isidentifier():
+                                last_var = var_name
+                                break
+
+                    if last_var:
+                        code += f'\nprint({last_var})'
+
+                f.write(code)
+                temp_path = f.name
+
+            # 执行代码（5秒超时）
+            result = subprocess.run(
+                ['python3', temp_path],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+
+            # 删除临时文件
+            os.unlink(temp_path)
+
+            # 提取输出
+            if result.returncode == 0 and result.stdout:
+                output = result.stdout.strip()
+                # 提取最后一行（通常是结果）
+                if output:
+                    last_line = output.split('\n')[-1].strip()
+                    # 验证是数字
+                    try:
+                        # 尝试转换为数字
+                        if '/' in last_line:
+                            parts = last_line.split('/')
+                            float(parts[0])
+                            float(parts[1])
+                            return last_line
+                        else:
+                            num = float(last_line)
+                            return str(int(num) if num == int(num) else num)
+                    except:
+                        # 不是数字，但仍然返回（可能是表达式）
+                        return last_line
+
+            return None
+
+        except subprocess.TimeoutExpired:
+            # 超时，清理临时文件
+            try:
+                os.unlink(temp_path)
+            except:
+                pass
+            return None
+        except Exception:
+            # 执行失败
+            try:
+                os.unlink(temp_path)
+            except:
+                pass
+            return None
+
+    def _extract_answer_from_code_block(self, code_block: str) -> Optional[str]:
+        """从代码块中提取答案（静态分析）
+
+        策略：
+        1. 查找print语句的参数
+        2. 查找return语句的值
+        3. 查找最后的计算结果
+
+        注意：这个方法只做静态分析，不执行代码
+        如果需要执行代码，调用 _execute_code_and_extract_answer
+        """
+        code_block = code_block.strip()
+
+        # 移除代码块标记
+        code_block = re.sub(r'^```python\n?', '', code_block)
+        code_block = re.sub(r'```$', '', code_block)
+
+        # 策略1: 查找print语句
+        print_pattern = r'print\(([^)]+)\)'
+        print_matches = re.findall(print_pattern, code_block)
+        if print_matches:
+            # 取最后一个print的内容
+            last_print = print_matches[-1].strip()
+            # 如果是变量名，尝试继续提取
+            if last_print.isidentifier():
+                # 查找这个变量的赋值
+                var_pattern = rf'{last_print}\s*=\s*(.+)'
+                var_match = re.search(var_pattern, code_block)
+                if var_match:
+                    return var_match.group(1).strip()
+            return last_print
+
+        # 策略2: 查找return语句
+        return_pattern = r'return\s+(.+?)\s*(?:\n|$)'
+        return_matches = re.findall(return_pattern, code_block)
+        if return_matches:
+            return return_matches[-1].strip()
+
+        # 策略3: 查找最后的赋值语句
+        assignment_lines = [line for line in code_block.split('\n') if '=' in line and not line.strip().startswith('#')]
+        if assignment_lines:
+            last_assignment = assignment_lines[-1]
+            # 提取等号右边的值
+            if '=' in last_assignment:
+                value = last_assignment.split('=', 1)[1].strip()
+                return value
+
+        return None
 
     def _extract_boxed(self, text: str) -> Optional[str]:
         """提取\boxed{}中的内容"""

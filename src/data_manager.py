@@ -38,6 +38,7 @@ class DataManager:
     def load_data(self, split: str = "train") -> Dict[str, List[Dict]]:
         """加载指定分割的数据"""
         data_by_type = defaultdict(list)
+        source_stats = defaultdict(int)  # 统计source字段
 
         # 1. Load HumanEval code data (NEW - proper format)
         humaneval_file = self._get_humaneval_file(split)
@@ -49,21 +50,58 @@ class DataManager:
                         # Convert HumanEval format to our format
                         converted = self._convert_humaneval_sample(sample)
                         data_by_type["code"].append(converted)
+                        source_stats["humaneval"] += 1
             print(f"✅ 加载 HumanEval code: {len(data_by_type['code'])} 样本")
 
-        # 2. Load mixed dataset (math/code/qa)
-        # 优先使用新路径格式: mixed/{split}_mixed.jsonl
-        dataset_file = self.data_dir / f"mixed/{split}_mixed.jsonl"
-        if not dataset_file.exists():
-            # 后备旧路径: {split}/mixed_dataset.jsonl
-            dataset_file = self.data_dir / f"{split}/mixed_dataset.jsonl"
+        # 2. Load from processed directory for test/val (contains source field)
+        if split in ["val", "test"]:
+            # 验证集使用balanced_val.jsonl（均匀分配）
+            if split == "val":
+                dataset_file = self.data_dir / "balanced_val.jsonl"
+                if not dataset_file.exists():
+                    # 后备：使用processed目录
+                    dataset_file = self.data_dir / "processed/val_mixed.jsonl"
+                    print(f"⚠️  balanced_val.jsonl不存在，使用processed/val_mixed.jsonl")
+            else:
+                # 测试集使用processed目录
+                dataset_file = self.data_dir / f"processed/{split}_mixed.jsonl"
+        else:
+            # 训练数据使用mixed目录
+            if split == "train":
+                # 优先使用修复后的包含MATH的数据集
+                fixed_file = self.data_dir / "mixed/train_mixed_with_math_fixed.jsonl"
+                math_file = self.data_dir / "mixed/train_mixed_with_math.jsonl"
+                balanced_file = self.data_dir / "mixed/train_mixed_balanced.jsonl"
+
+                if fixed_file.exists():
+                    dataset_file = fixed_file
+                    print(f"✅ 使用修复后的MATH数据训练集: {fixed_file.name}")
+                elif math_file.exists():
+                    dataset_file = math_file
+                    print(f"✅ 使用包含MATH数据的训练集: {math_file.name}")
+                elif balanced_file.exists():
+                    dataset_file = balanced_file
+                else:
+                    dataset_file = self.data_dir / f"mixed/{split}_mixed.jsonl"
+            else:
+                dataset_file = self.data_dir / f"mixed/{split}_mixed.jsonl"
+            if not dataset_file.exists():
+                dataset_file = self.data_dir / f"{split}/mixed_dataset.jsonl"
 
         if dataset_file.exists():
             with open(dataset_file, 'r') as f:
                 for line in f:
                     if line.strip():
                         sample = json.loads(line)
+
+                        # 🔴 过滤MBPP数据集 - 数据质量问题
+                        if sample.get("source") == "mbpp":
+                            continue
+
                         problem_type = sample.get("problem_type", "math")
+                        # 保留source字段（如果存在）
+                        if "source" in sample:
+                            source_stats[sample["source"]] += 1
                         data_by_type[problem_type].append(sample)
 
         # 打乱
@@ -74,6 +112,12 @@ class DataManager:
         print(f"✅ 加载 {split.upper()} 数据:")
         for ptype, samples in data_by_type.items():
             print(f"  {ptype}: {len(samples)} 样本")
+
+        # 打印source统计
+        if source_stats:
+            print(f"\n📊 数据源分布:")
+            for source, count in sorted(source_stats.items()):
+                print(f"  {source}: {count} 样本")
 
         return dict(data_by_type)
 
@@ -107,6 +151,7 @@ class DataManager:
         {
             "problem": str,
             "problem_type": "code",
+            "source": "humaneval",  # NEW - 添加source字段
             "tag": "humaneval",
             "ground_truth": str,  # canonical_solution
             "entry_point": str,  # NEW
@@ -117,6 +162,7 @@ class DataManager:
         return {
             "problem": sample["prompt"],  # Full function signature + docstring
             "problem_type": "code",
+            "source": "humaneval",  # 添加source字段用于追踪
             "tag": "humaneval",
             "task_id": sample.get("task_id", ""),
             "ground_truth": sample["canonical_solution"],

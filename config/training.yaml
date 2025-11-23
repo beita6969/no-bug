@@ -16,7 +16,7 @@ num_return_sequences_in_group: 6  # GRPO组大小：每个问题生成6个工作
 ppo_epochs: 1                      # 在线学习：每个batch只训练一次
 async_generation_ratio: 0          # 同步模式：0表示完全同步
 use_kl_loss: true
-kl_loss_coef: 0.001
+kl_loss_coef: 0.01  # 从0.001提高到0.01，防止策略偏离过快
 clip_range: 0.2
 gamma: 1.0                         # 折扣因子
 lambda_gae: 0.95                   # GAE lambda
@@ -38,9 +38,9 @@ lora_target_modules: "q_proj,k_proj,v_proj,o_proj"
 lora_dropout: 0.05
 
 # 训练参数
-learning_rate: 1.0e-5
+learning_rate: 5.0e-6  # 从1.0e-5降低到5.0e-6
 weight_decay: 0.01
-max_grad_norm: 1.0
+max_grad_norm: 0.5     # 从1.0降低到0.5，更保守的梯度裁剪
 gradient_accumulation_steps: 2     # 减少累积步数（batch变大了）
 warmup_steps: 50
 bf16: true
@@ -55,9 +55,10 @@ world_size: 1                      # 单GPU world size
 
 # 数据集配置
 data_dir: "data"
-train_dataset: "data/mixed/train_mixed.jsonl"
-val_dataset: "data/mixed/val_mixed.jsonl"
-test_dataset: "data/mixed/test_mixed.jsonl"
+train_dataset: "11/integrated_aflow_roll/data/ready_to_train/train_final_clean.jsonl"
+# 使用均匀分配的验证集（每个source 30个样本，共180个）
+val_dataset: "11/integrated_aflow_roll/data/ready_to_train/test.jsonl"
+test_dataset: "11/integrated_aflow_roll/data/ready_to_train/test.jsonl"
 
 # 混合采样比例
 domain_ratios:
@@ -107,9 +108,16 @@ wandb:
   api_key: "b42ca0000cf06f97b05eba34f58823ad5f3122a4"
   run_name: null  # 自动生成
 
+# Temperature调度配置（禁用动态调度）
+temperature_schedule:
+  enabled: false                   # 禁用动态温度调度
+  initial: 0.2
+  final: 0.2
+  warmup_steps: 0
+
 # 生成配置
 generation_config:
-  temperature: 0.3  # 增加探索性（从0.1提高到0.3）
+  temperature: 0.2  # 固定值0.2，不变
   top_p: 0.95
   top_k: 50
   max_new_tokens: 4096

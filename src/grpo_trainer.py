@@ -360,20 +360,20 @@ class GRPOTrainer:
                             prediction=answer,
                             ground_truth=ground_truth,
                             problem_type=problem_type,
-                            metadata=metadata
+                            metadata=metadata,
+                            test=sample.get('test', ''),
+                            entry_point=sample.get('entry_point', ''),
+                            source=sample.get('source', None)  # 🆕 传递数据集来源
                         )
 
                         # ✨ 新增：显式计算并记录正确性
-                        correctness = self.reward_computer._compute_correctness_reward(
-                            prediction=answer,
-                            ground_truth=ground_truth,
-                            problem_type=problem_type
-                        )
+                        # compute_reward 现在返回 1.0 (正确) 或 0.0 (错误)
+                        correctness = reward 
                         correctness_scores.append(correctness)
                         group_correctness.append(correctness)
 
-                        # 判断是否正确（correctness > 5.0 表示接近正确或完全正确）
-                        is_correct = correctness >= 5.0
+                        # 判断是否正确（correctness == 1.0）
+                        is_correct = correctness > 0.5
                         status_icon = "✅" if is_correct else "❌"
 
                         # 实时日志到 wandb (样本级别)
@@ -384,11 +384,12 @@ class GRPOTrainer:
                             f"sample/sample_id": sample_idx * 4 + i,
                         })
 
-                        print(f"  {status_icon} 正确性评分: {correctness:.1f}/10.0 | 预测: {str(answer)[:50]} | 真值: {str(ground_truth)[:50]}")
+                        print(f"  {status_icon} 正确性评分: {correctness:.1f}/1.0 | 预测: {str(answer)[:50]} | 真值: {str(ground_truth)[:50]}")
                     else:
-                        reward = -10.0  # 执行失败惩罚
-                        correctness_scores.append(-10.0)
-                        group_correctness.append(-10.0)
+                        reward = 0.0  # 执行失败惩罚
+                        correctness = 0.0 # 确保correctness被定义
+                        correctness_scores.append(0.0)
+                        group_correctness.append(0.0)
                         print(f"  ❌ 执行失败 | 真值: {str(ground_truth)[:50]}")
 
                 except Exception as e:
@@ -447,7 +448,7 @@ class GRPOTrainer:
 
         # 4. 指标
         # ✨ 新增：计算准确率统计
-        num_correct = sum(1 for score in correctness_scores if score >= 5.0)
+        num_correct = sum(1 for score in correctness_scores if score >= 0.9) # 修改阈值为0.9适应二元奖励
         num_total = len(correctness_scores)
         accuracy = (num_correct / num_total * 100) if num_total > 0 else 0.0
         avg_correctness = np.mean(correctness_scores) if correctness_scores else 0.0
@@ -459,7 +460,7 @@ class GRPOTrainer:
                           [s['problem_type'] for s in batch for _ in range(num_sequences)])
                           if p == problem_type]
             if type_scores:
-                type_correct = sum(1 for s in type_scores if s >= 5.0)
+                type_correct = sum(1 for s in type_scores if s >= 0.9) # 修改阈值
                 type_accuracy = (type_correct / len(type_scores) * 100)
                 type_avg = np.mean(type_scores)
                 problem_type_stats[problem_type] = {
@@ -708,19 +709,23 @@ class GRPOTrainer:
 
                 # 计算正确性
                 if metadata['success']:
-                    correctness = self.reward_computer._compute_correctness_reward(
+                    correctness = self.reward_computer.compute_reward(
+                        problem=problem,
                         prediction=answer,
                         ground_truth=ground_truth,
-                        problem_type=problem_type
+                        problem_type=problem_type,
+                        test=sample.get('test', ''),
+                        entry_point=sample.get('entry_point', ''),
+                        source=sample.get('source', None)  # 🆕 传递数据集来源
                     )
                     correctness_scores.append(correctness)
                     total_cost += cost
                     successful_executions += 1
 
-                    is_correct = correctness >= 5.0
+                    is_correct = correctness > 0.5
                     status_icon = "✅" if is_correct else "❌"
                     if idx <= 5:  # 只打印前5个样本的详情
-                        print(f"  {status_icon} [{idx}/{num_samples}] 正确性: {correctness:.1f}/10.0")
+                        print(f"  {status_icon} [{idx}/{num_samples}] 正确性: {correctness:.1f}/1.0")
                 else:
                     correctness_scores.append(0.0)
                     if idx <= 5:
@@ -731,7 +736,7 @@ class GRPOTrainer:
                 correctness_scores.append(0.0)
 
         # 计算指标
-        num_correct = sum(1 for score in correctness_scores if score >= 5.0)
+        num_correct = sum(1 for score in correctness_scores if score >= 0.9)  # Binary reward: 0.9 threshold for 1.0 scores
         val_accuracy = (num_correct / num_samples * 100) if num_samples > 0 else 0.0
         avg_correctness = np.mean(correctness_scores) if correctness_scores else 0.0
         avg_cost = total_cost / successful_executions if successful_executions > 0 else 0.0

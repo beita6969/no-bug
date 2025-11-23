@@ -1,0 +1,19 @@
+{
+  "total_samples": 13428,
+  "type_distribution": {
+    "code": 3428,
+    "math": 4000,
+    "mixed": 3000,
+    "qa": 3000
+  },
+  "source_distribution": {
+    "humaneval": 1983,
+    "MATH": 2000,
+    "mmlu": 3000,
+    "commonsenseqa": 2166,
+    "mbpp": 1445,
+    "gsm8k": 2000,
+    "hotpotqa": 834
+  },
+  "math_samples_added": 2000
+}
