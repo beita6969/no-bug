@@ -135,11 +135,12 @@ Good prompts include:
    Call: await self.answer_generate(input=str)
    Returns: {{'thought': str, 'answer': str}}
 
-3. **Programmer(llm)** - Generate and execute Python code
+3. **Programmer(llm)** - Generate and execute Python code, returns EXECUTION RESULT
    Call: await self.programmer(problem=str, analysis=str)
-   Returns: {{'code': str, 'output': str}}
-   **IMPORTANT**: Use 'output' (execution result) NOT 'code' for the answer!
-   Example: result = await self.programmer(problem=p); answer = result['output']  # NOT result['code']!
+   Returns: {{'code': str (source code - NEVER use this as answer!), 'output': str (EXECUTION RESULT - ALWAYS use this!)}}
+   ⚠️ CRITICAL: result['output'] = computed answer (e.g., "42"), result['code'] = source code (e.g., "def solve(): return 42")
+   ✅ CORRECT: answer = result['output']  # Gets "42"
+   ❌ WRONG: answer = result['code']  # Gets "def solve(): return 42" - THIS IS A BUG!
 
 4. **Review(llm)** - Review solution
    Call: await self.review(problem=str, solution=str)
@@ -183,18 +184,23 @@ class Workflow:
         return solution['answer'], self.llm.get_usage_summary()["total_cost"]
 ```
 
-## IMPORTANT: Programmer Usage for Math
-**⚠️ CRITICAL WARNING**: When using Programmer for math calculations:
-```python
-# CORRECT: Use 'output' which contains the execution result
-result = await self.programmer(problem=problem, analysis="Calculate")
-final_answer = result['output']  # This is the computed answer!
-return "\\boxed{" + str(final_answer) + "}", cost
+## ⚠️⚠️⚠️ CRITICAL BUG PREVENTION - READ THIS ⚠️⚠️⚠️
+**Programmer returns TWO fields - you MUST use the correct one:**
+- `result['output']` = THE ANSWER (computed result like "42", "3.14", "hello")
+- `result['code']` = THE SOURCE CODE (like "def solve(): return 42") - NEVER USE THIS AS ANSWER!
 
-# ❌ WRONG: Do NOT use 'code' - it's just the source code, not the result!
-# answer = result['code']  # This would return Python code, not the answer!
+```python
+# ✅✅✅ CORRECT - This returns the computed answer:
+result = await self.programmer(problem=problem, analysis="Calculate")
+final_answer = result['output']  # e.g., "42" - THIS IS CORRECT!
+return "\\boxed{{" + final_answer + "}}", cost  # Returns \\boxed{{42}}
+
+# ❌❌❌ WRONG - This returns Python source code (BUG!):
+result = await self.programmer(problem=problem, analysis="Calculate")
+final_answer = result['code']  # e.g., "def solve(): return 42" - THIS IS A BUG!
+return "\\boxed{{" + final_answer + "}}", cost  # Returns \boxed{{def solve...}} - WRONG!
 ```
-**RULE**: When returning from Programmer, ALWAYS use result['output'], NEVER result['code'].
+**REMEMBER: output=answer, code=source. ALWAYS use result['output'] for the final answer!**
 
 ## DESIGN FREELY:
 - Use 1 operator OR combine multiple operators

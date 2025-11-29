@@ -103,9 +103,9 @@ class ResponseStandardizer:
     def _standardize_programmer(resp: Dict) -> Dict:
         return {
             'success': True,
-            'content': resp.get('code', ''),
+            'content': resp.get('output', ''),
             'metadata': {
-                'output': resp.get('output', ''),
+                'code': resp.get('code', ''),
                 'original': resp
             },
             'error': None

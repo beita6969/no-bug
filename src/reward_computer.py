@@ -498,6 +498,15 @@ Be LENIENT with formatting differences but STRICT with factual/numerical differe
         pred_str = str(prediction).strip()
         gt_str = str(ground_truth).strip()
 
+        # P0-FIX: 检测预测是否为代码格式（而非数学答案）
+        # 如果预测包含Python代码关键字，判定为格式错误(0.2)而非调用LLM Judge
+        code_keywords = ['import ', 'def ', 'class ', 'return ', 'print(', 'for ', 'while ', 'if __name__']
+        pred_lower = pred_str.lower()
+        if any(kw in pred_lower for kw in code_keywords):
+            if self.debug_logging:
+                print(f"  ⚠️  P0-FIX: 检测到代码格式答案，判定为格式错误(0.2)")
+            return 0.2  # 格式错误，不是有效的数学答案
+
         # 1. 首先尝试LLM Judge (如果启用)
         if self.use_llm_judge:
             is_correct = self._llm_judge_compare(
